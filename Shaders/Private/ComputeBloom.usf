@@ -1,0 +1,108 @@
+#include "/Engine/Public/Platform.ush"
+/*==================================================================================================
+    ComputeBloom.usf: Blooming a render target: clear, downsample, upsample
+
+    Adapted from https://www.froyok.fr/blog/2021-12-ue4-custom-bloom/
+===================================================================================================*/
+
+Texture2D MipInSRV;
+SamplerState MipSampler;
+
+float2 TexelSize;
+RWTexture2D<half4> MipOutUAV;
+
+Texture2D CurrInSRV;
+float Radius;
+
+
+float4 Downsample( Texture2D Texture, SamplerState Sampler, float2 UV, float2 PixelSize )
+{
+    const float2 Coords[13] = {
+        float2( -1.0f,  1.0f ), float2(  1.0f,  1.0f ),
+        float2( -1.0f, -1.0f ), float2(  1.0f, -1.0f ),
+
+        float2(-2.0f, 2.0f), float2( 0.0f, 2.0f), float2( 2.0f, 2.0f),
+        float2(-2.0f, 0.0f), float2( 0.0f, 0.0f), float2( 2.0f, 0.0f),
+        float2(-2.0f,-2.0f), float2( 0.0f,-2.0f), float2( 2.0f,-2.0f)
+    };
+
+
+    const float Weights[13] = {
+        // 4 samples
+        // (1 / 4) * 0.5f = 0.125f
+        0.125f, 0.125f,
+        0.125f, 0.125f,
+
+        // 9 samples
+        // (1 / 9) * 0.5f
+        0.0555555f, 0.0555555f, 0.0555555f,
+        0.0555555f, 0.0555555f, 0.0555555f,
+        0.0555555f, 0.0555555f, 0.0555555f
+    };
+
+    float3 OutColor = float3( 0.0f, 0.0f ,0.0f );
+
+    UNROLL
+    for( int i = 0; i < 13; i++ )
+    {
+        float2 CurrentUV = UV + Coords[i] * PixelSize;
+        OutColor += Weights[i] * Texture.SampleLevel( Sampler, CurrentUV, 0 ).rgb;
+    }
+
+    return float4(OutColor, 0.0f);
+}
+
+
+float4 Upsample( Texture2D Texture, SamplerState Sampler, float2 UV, float2 PixelSize )
+{
+    const float2 Coords[9] = {
+        float2( -1.0f,  1.0f ), float2(  0.0f,  1.0f ), float2(  1.0f,  1.0f ),
+        float2( -1.0f,  0.0f ), float2(  0.0f,  0.0f ), float2(  1.0f,  0.0f ),
+        float2( -1.0f, -1.0f ), float2(  0.0f, -1.0f ), float2(  1.0f, -1.0f )
+    };
+
+    const float Weights[9] = {
+        0.0625f, 0.125f, 0.0625f,
+        0.125f,  0.25f,  0.125f,
+        0.0625f, 0.125f, 0.0625f
+    };
+
+    float3 Color = float3( 0.0f, 0.0f, 0.0f );
+
+    UNROLL
+    for( int i = 0; i < 9; i++ )
+    {
+        float2 CurrentUV = UV + Coords[i] * PixelSize;
+        Color += Weights[i] * Texture.SampleLevel(Sampler, CurrentUV, 0).rgb;
+    }
+
+    return float4(Color, 0.0f);
+}
+
+
+[numthreads(8, 8, 1)]
+void ClearCS(uint3 DT_ID : SV_DispatchThreadID)
+{
+    MipOutUAV[DT_ID.xy] = half4(0.0f, 0.0f, 0.0f, 0.0f);
+}
+
+
+[numthreads(8, 8, 1)]
+void DownsampleCS(uint3 DT_ID : SV_DispatchThreadID)
+{
+    float2 UV = TexelSize * (DT_ID.xy + 0.5f);
+    
+    MipOutUAV[DT_ID.xy] = Downsample(MipInSRV, MipSampler, UV, TexelSize);
+}
+
+
+[numthreads(8, 8, 1)]
+void UpsampleCombineCS(uint3 DT_ID : SV_DispatchThreadID)
+{
+    float2 UV = TexelSize * (DT_ID.xy + 0.5f);
+
+    float4 upColor = Upsample(MipInSRV, MipSampler, UV, TexelSize);
+    float4 currentColor = CurrInSRV.SampleLevel(MipSampler, UV, 0);
+
+    MipOutUAV[DT_ID.xy] = lerp(currentColor, upColor, Radius);
+}
